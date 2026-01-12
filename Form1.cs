@@ -1,4 +1,4 @@
-using PdfSharpCore.Drawing;
+﻿using PdfSharpCore.Drawing;
 using PdfSharpCore.Pdf;
 using PdfSharpCore.Pdf.IO;
 using System;
@@ -21,6 +21,7 @@ namespace CombinePDF
         private ListView lvFinal;     // right side = final pages
         private ImageList imageListSources;  // optional, if you want separate image lists
         private ImageList imageListFinal;
+        private int dragSourceIndex = -1;
 
         public Form1()
         {
@@ -47,29 +48,42 @@ namespace CombinePDF
                 LabelEdit = false
             };
 
-            // Drag & drop reorder + add from files
-            lvFinal.ItemDrag += (s, e) => { if (e.Button == MouseButtons.Left) DoDragDrop(e.Item, DragDropEffects.Move); };
-            lvFinal.DragEnter += (s, e) => e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
-            lvFinal.DragDrop += (s, e) =>
-            {
-                Point pt = lvFinal.PointToClient(new Point(e.X, e.Y));
-                var target = lvFinal.GetItemAt(pt.X, pt.Y);
+            //lvFinal.AutoArrange = false;          // Important: prevents auto-snap interfering
+            lvFinal.Sorting = SortOrder.None;     // No auto-sorting
+            lvFinal.View = View.LargeIcon;        // Confirm this (insertion mark works best here)
 
-                if (e.Data.GetDataPresent(typeof(ListViewItem))) // Reorder
-                {
-                    var dragged = (ListViewItem)e.Data.GetData(typeof(ListViewItem));
-                    int idx = target?.Index ?? lvFinal.Items.Count;
-                    lvFinal.Items.Remove(dragged);
-                    lvFinal.Items.Insert(idx, dragged);
-                    var page = (PageItem)dragged.Tag;
-                    finalPages.Remove(page);
-                    finalPages.Insert(idx, page);
-                }
-                else if (e.Data.GetDataPresent(DataFormats.FileDrop)) // Add new file(s)
-                {
-                    AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
-                }
-            };
+            // Drag & drop reorder + add from files
+            //lvFinal.ItemDrag += (s, e) => { if (e.Button == MouseButtons.Left) DoDragDrop(e.Item, DragDropEffects.Move); };
+            //lvFinal.DragEnter += (s, e) => e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
+            //lvFinal.DragDrop += (s, e) =>
+            //{
+            //    Point pt = lvFinal.PointToClient(new Point(e.X, e.Y));
+            //    var target = lvFinal.GetItemAt(pt.X, pt.Y);
+
+            //    if (e.Data.GetDataPresent(typeof(ListViewItem))) // Reorder
+            //    {
+            //        var dragged = (ListViewItem)e.Data.GetData(typeof(ListViewItem));
+            //        int idx = target?.Index ?? lvFinal.Items.Count;
+            //        lvFinal.Items.Remove(dragged);
+            //        lvFinal.Items.Insert(idx, dragged);
+            //        var page = (PageItem)dragged.Tag;
+            //        finalPages.Remove(page);
+            //        finalPages.Insert(idx, page);
+            //    }
+            //    else if (e.Data.GetDataPresent(DataFormats.FileDrop)) // Add new file(s)
+            //    {
+            //        AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
+            //    }
+            //};
+
+            lvFinal.AllowDrop = true;
+            lvFinal.ItemDrag += lvFinal_ItemDrag;          // rename if needed
+            lvFinal.DragEnter += lvFinal_DragEnter;
+            lvFinal.DragOver += lvFinal_DragOver;          // ← new: for insertion mark
+            lvFinal.DragLeave += lvFinal_DragLeave;        // ← new: clean up
+            lvFinal.DragDrop += lvFinal_DragDrop;          // updated version
+            lvFinal.InsertionMark.Color = Color.DodgerBlue;
+            //lvFinal.AutoArrange = false;
 
             imageListFinal = lvFinal.LargeImageList;
             mainPanel.Controls.Add(lvFinal);
@@ -117,11 +131,167 @@ namespace CombinePDF
             this.Controls.Add(mainPanel);
 
             // Form-level drag & drop (fallback + main way to add files now)
-            this.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
-            this.DragDrop += (s, e) => AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
+            //this.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
+            //this.DragDrop += (s, e) => AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
 
             // Optional: tag for clarity (not strictly needed anymore)
             lvFinal.Tag = "final";
+        }
+
+        private void lvFinal_ItemDrag(object sender, ItemDragEventArgs e)
+        {
+            // Store source index for a reliable reference during Drop
+            if (e.Item is ListViewItem item)
+            {
+                dragSourceIndex = item.Index;
+                DoDragDrop(e.Item, DragDropEffects.Move);
+            }
+        }
+
+        private void lvFinal_DragEnter(object sender, DragEventArgs e)
+        {
+            // Allow our own reordering (Move) + file drops (Copy)
+            if (e.Data.GetDataPresent(typeof(ListViewItem)))
+            {
+                e.Effect = DragDropEffects.Move;
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                e.Effect = DragDropEffects.Copy;
+            }
+            else
+            {
+                e.Effect = DragDropEffects.None;
+            }
+        }
+
+        // replace existing lvFinal_DragOver with this (ensures Effect is set and insertion mark logic stays)
+        private void lvFinal_DragOver(object sender, DragEventArgs e)
+        {
+            // Ensure an appropriate effect is reported
+            if (e.Data.GetDataPresent(typeof(ListViewItem)))
+                e.Effect = DragDropEffects.Move;
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                e.Effect = DragDropEffects.Copy;
+            else
+                e.Effect = DragDropEffects.None;
+
+            // Only update insertion mark when moving ListView items
+            if (e.Effect != DragDropEffects.Move)
+                return;
+
+            Point pt = lvFinal.PointToClient(new Point(e.X, e.Y));
+            ListViewItem targetItem = lvFinal.GetItemAt(pt.X, pt.Y);
+
+            if (targetItem == null)
+            {
+                lvFinal.InsertionMark.Index = -1;
+            }
+            else
+            {
+                Rectangle bounds = targetItem.Bounds;
+                int midpointY = bounds.Top + (bounds.Height / 2);
+
+                if (pt.Y < midpointY)
+                {
+                    lvFinal.InsertionMark.Index = targetItem.Index;
+                    lvFinal.InsertionMark.AppearsAfterItem = false;
+                }
+                else
+                {
+                    lvFinal.InsertionMark.Index = targetItem.Index;
+                    lvFinal.InsertionMark.AppearsAfterItem = true;
+                }
+            }
+        }
+
+        private void lvFinal_DragLeave(object sender, EventArgs e)
+        {
+            // Clean up the insertion mark when mouse leaves the control
+            lvFinal.InsertionMark.Index = -1;
+        }
+
+        // replace existing lvFinal_DragDrop with this (robust move handling and correct index adjustments)
+        private void lvFinal_DragDrop(object sender, DragEventArgs e)
+        {
+            // Handle file drop
+            if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
+                lvFinal.InsertionMark.Index = -1;
+                dragSourceIndex = -1;
+                return;
+            }
+
+            if (!e.Data.GetDataPresent(typeof(ListViewItem)))
+            {
+                dragSourceIndex = -1;
+                return;
+            }
+
+            // Resolve the dragged item and source index
+            var draggedItemFromData = (ListViewItem)e.Data.GetData(typeof(ListViewItem));
+            int sourceIndex = dragSourceIndex >= 0 ? dragSourceIndex : draggedItemFromData?.Index ?? -1;
+            if (sourceIndex < 0 || sourceIndex >= lvFinal.Items.Count)
+            {
+                // Fallback: if the stored index is invalid, try to locate the item by reference
+                sourceIndex = Array.IndexOf(lvFinal.Items.Cast<ListViewItem>().ToArray(), draggedItemFromData);
+                if (sourceIndex < 0)
+                {
+                    dragSourceIndex = -1;
+                    return;
+                }
+            }
+
+            int targetIndex = lvFinal.InsertionMark.Index;
+            if (targetIndex == -1)
+            {
+                // append to end
+                targetIndex = lvFinal.Items.Count - 1;
+                targetIndex++; // insert at Count (append)
+            }
+            else if (lvFinal.InsertionMark.AppearsAfterItem)
+            {
+                targetIndex++;
+            }
+
+            // No-op checks (drop at same place or adjacent no-op)
+            if (targetIndex == sourceIndex || targetIndex == sourceIndex + 1)
+            {
+                lvFinal.InsertionMark.Index = -1;
+                dragSourceIndex = -1;
+                return;
+            }
+
+            lvFinal.BeginUpdate();
+            try
+            {
+                // Use the actual existing ListViewItem instance for smooth visual behavior
+                var itemToMove = lvFinal.Items[sourceIndex];
+
+                // Remove from UI and insert at new index (adjust target if necessary)
+                lvFinal.Items.RemoveAt(sourceIndex);
+                if (sourceIndex < targetIndex) targetIndex--; // removal shifts indexes down
+                lvFinal.Items.Insert(targetIndex, itemToMove);
+
+                // Sync backing list
+                var page = (PageItem)itemToMove.Tag;
+                // Remove at original source (adjusted using original sourceIndex)
+                finalPages.RemoveAt(sourceIndex);
+                // Insert at adjusted target index
+                finalPages.Insert(targetIndex, page);
+
+                // Select and ensure visible the moved item
+                itemToMove.Selected = true;
+                itemToMove.Focused = true;
+                lvFinal.EnsureVisible(targetIndex);
+            }
+            finally
+            {
+                lvFinal.EndUpdate();
+                lvFinal.InsertionMark.Index = -1;
+                dragSourceIndex = -1;
+            }
         }
 
         private void AddSourceFiles(string[] files)
