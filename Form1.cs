@@ -22,6 +22,8 @@ namespace CombinePDF
         private ImageList imageListSources;  // optional, if you want separate image lists
         private ImageList imageListFinal;
         private int dragSourceIndex = -1;
+        private Label labelSaveMessage;
+        private FlowLayoutPanel btnPanel;
 
         public Form1()
         {
@@ -48,51 +50,26 @@ namespace CombinePDF
                 LabelEdit = false
             };
 
-            //lvFinal.AutoArrange = false;          // Important: prevents auto-snap interfering
+            lvFinal.AutoArrange = true;          // Important: prevents auto-snap interfering
             lvFinal.Sorting = SortOrder.None;     // No auto-sorting
             lvFinal.View = View.LargeIcon;        // Confirm this (insertion mark works best here)
-
-            // Drag & drop reorder + add from files
-            //lvFinal.ItemDrag += (s, e) => { if (e.Button == MouseButtons.Left) DoDragDrop(e.Item, DragDropEffects.Move); };
-            //lvFinal.DragEnter += (s, e) => e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
-            //lvFinal.DragDrop += (s, e) =>
-            //{
-            //    Point pt = lvFinal.PointToClient(new Point(e.X, e.Y));
-            //    var target = lvFinal.GetItemAt(pt.X, pt.Y);
-
-            //    if (e.Data.GetDataPresent(typeof(ListViewItem))) // Reorder
-            //    {
-            //        var dragged = (ListViewItem)e.Data.GetData(typeof(ListViewItem));
-            //        int idx = target?.Index ?? lvFinal.Items.Count;
-            //        lvFinal.Items.Remove(dragged);
-            //        lvFinal.Items.Insert(idx, dragged);
-            //        var page = (PageItem)dragged.Tag;
-            //        finalPages.Remove(page);
-            //        finalPages.Insert(idx, page);
-            //    }
-            //    else if (e.Data.GetDataPresent(DataFormats.FileDrop)) // Add new file(s)
-            //    {
-            //        AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
-            //    }
-            //};
-
-            lvFinal.AllowDrop = true;
+            lvFinal.Alignment = ListViewAlignment.Default;         
+            
             lvFinal.ItemDrag += lvFinal_ItemDrag;          // rename if needed
             lvFinal.DragEnter += lvFinal_DragEnter;
             lvFinal.DragOver += lvFinal_DragOver;          // ← new: for insertion mark
             lvFinal.DragLeave += lvFinal_DragLeave;        // ← new: clean up
             lvFinal.DragDrop += lvFinal_DragDrop;          // updated version
-            lvFinal.InsertionMark.Color = Color.DodgerBlue;
-            //lvFinal.AutoArrange = false;
+            lvFinal.InsertionMark.Color = Color.DodgerBlue;           
 
             imageListFinal = lvFinal.LargeImageList;
             mainPanel.Controls.Add(lvFinal);
 
             // Bottom buttons panel
-            var btnPanel = new FlowLayoutPanel
+            btnPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 50,
+                Height = 70,
                 Padding = new Padding(10),
                 BackColor = Color.LightGray  // Optional: slight visual separation
             };
@@ -122,17 +99,26 @@ namespace CombinePDF
             var btnMergeSave = new Button { Text = "Merge & Save...", Width = 140 };
             btnMergeSave.Click += BtnMergeSave_Click;
 
+            labelSaveMessage = new Label
+            {
+                Text = "",
+                AutoSize = true,
+                MinimumSize = new Size(300, 0),           // Prevents collapsing too small
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.Black,
+                Visible = false,                           // Start hidden
+                Padding = new Padding(5, 5, 10, 5),      // Breathing room
+                Margin = new Padding(0, 0, 0, 0)         // Space from previous buttons
+            };
+
             btnPanel.Controls.Add(btnAddFiles);
             btnPanel.Controls.Add(btnDelete);
             btnPanel.Controls.Add(btnMergeSave);
+            btnPanel.Controls.Add(labelSaveMessage);
 
             mainPanel.Controls.Add(btnPanel);
 
-            this.Controls.Add(mainPanel);
-
-            // Form-level drag & drop (fallback + main way to add files now)
-            //this.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
-            //this.DragDrop += (s, e) => AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
+            this.Controls.Add(mainPanel);            
 
             // Optional: tag for clarity (not strictly needed anymore)
             lvFinal.Tag = "final";
@@ -164,8 +150,7 @@ namespace CombinePDF
                 e.Effect = DragDropEffects.None;
             }
         }
-
-        // replace existing lvFinal_DragOver with this (ensures Effect is set and insertion mark logic stays)
+        
         private void lvFinal_DragOver(object sender, DragEventArgs e)
         {
             // Ensure an appropriate effect is reported
@@ -211,7 +196,6 @@ namespace CombinePDF
             lvFinal.InsertionMark.Index = -1;
         }
 
-        // replace existing lvFinal_DragDrop with this (robust move handling and correct index adjustments)
         private void lvFinal_DragDrop(object sender, DragEventArgs e)
         {
             // Handle file drop
@@ -289,9 +273,18 @@ namespace CombinePDF
             finally
             {
                 lvFinal.EndUpdate();
+                ForceListViewLayoutRefresh(lvFinal);
                 lvFinal.InsertionMark.Index = -1;
                 dragSourceIndex = -1;
             }
+        }
+        private void ForceListViewLayoutRefresh(ListView listView)
+        {
+            var originalView = listView.View;
+            listView.View = View.Tile;      // or View.Details — whichever flickers least noticeably
+            listView.View = originalView;
+            listView.Refresh();
+            listView.Update();
         }
 
         private void AddSourceFiles(string[] files)
@@ -488,7 +481,12 @@ namespace CombinePDF
         {
             if (!finalPages.Any())
             {
-                MessageBox.Show("No pages in final document!", "Info");
+                labelSaveMessage.Text = "No pages to merge!";
+                labelSaveMessage.ForeColor = Color.Black;
+                labelSaveMessage.Visible = true;
+                btnPanel.PerformLayout();
+                btnPanel.Refresh();
+                btnPanel.Update();
                 return;
             }
 
@@ -515,13 +513,21 @@ namespace CombinePDF
                     }
                 }
 
-                output.Save(sfd.FileName);
-                MessageBox.Show("Saved successfully!", "Done");
+                output.Save(sfd.FileName);                
+                labelSaveMessage.Text = $"Saved successfully: {sfd.FileName}";
+                labelSaveMessage.ForeColor = Color.Green;
+                labelSaveMessage.Visible = true;
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error:\n{ex.Message}", "Failed");
+                labelSaveMessage.Text = $"Failed to save the PDF. Error: {ex.Message}";
+                labelSaveMessage.ForeColor = Color.Red;
+                labelSaveMessage.Visible = true;
             }
+
+            btnPanel.PerformLayout();
+            btnPanel.Refresh();
+            btnPanel.Update();
         }
 
         private bool IsSupported(string file) =>
