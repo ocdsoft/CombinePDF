@@ -1,19 +1,29 @@
-using PdfSharpCore.Drawing;
+﻿using PdfSharpCore.Drawing;
 using PdfSharpCore.Pdf;
 using PdfSharpCore.Pdf.IO;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Reflection.PortableExecutable;
 using System.Windows.Forms;
 using static System.Net.Mime.MediaTypeNames;
+using PdfiumViewer;
+using Image = System.Drawing.Image;
 
 namespace CombinePDF
 {
     public partial class Form1 : Form
     {
-        private List<string> filePaths = new List<string>(); // Store full paths
+        private List<PageItem> finalPages = new List<PageItem>();   // Final pages to merge (source file + page index)
+        private ListView lvSources;   // left side = source files
+        private ListView lvFinal;     // right side = final pages
+        private ImageList imageListSources;  // optional, if you want separate image lists
+        private ImageList imageListFinal;
+        private int dragSourceIndex = -1;
+        private Label labelSaveMessage;
+        private FlowLayoutPanel btnPanel;
 
         public Form1()
         {
@@ -23,197 +33,516 @@ namespace CombinePDF
 
         private void SetupUI()
         {
-            this.Text = "PDF Merger - Drag & Drop Files";
-            this.Size = new Size(600, 500);
+            this.Text = "Advanced PDF Merger & Page Editor";
+            this.Size = new Size(900, 700);  // Slightly narrower since no left panel
             this.AllowDrop = true;
 
-            // ListView for files (supports drag-reorder)
-            var lv = new ListView
+            // No SplitContainer anymore - use a single main panel for the final view
+            var mainPanel = new Panel { Dock = DockStyle.Fill };
+
+            lvFinal = new ListView
             {
                 Dock = DockStyle.Fill,
-                View = View.Details,
-                FullRowSelect = true,
-                AllowDrop = true,
+                View = View.LargeIcon,
+                LargeImageList = new ImageList { ImageSize = new Size(96, 128), ColorDepth = ColorDepth.Depth32Bit },
                 MultiSelect = true,
-                HeaderStyle = ColumnHeaderStyle.Nonclickable
+                AllowDrop = true,
+                LabelEdit = false
             };
-            lv.Columns.Add("File Name", 400);
-            lv.Columns.Add("Path", 0); // Hidden column for full path
-            lv.ItemDrag += Lv_ItemDrag;
-            lv.DragEnter += Lv_DragEnter;
-            lv.DragDrop += Lv_DragDrop;
-            lv.DragOver += (s, e) => e.Effect = DragDropEffects.Move;
 
-            // Drag & Drop for the whole form (fallback)
-            this.DragEnter += Form_DragEnter;
-            this.DragDrop += Form_DragDrop;
+            lvFinal.AutoArrange = true;          // Important: prevents auto-snap interfering
+            lvFinal.Sorting = SortOrder.None;     // No auto-sorting
+            lvFinal.View = View.LargeIcon;        // Confirm this (insertion mark works best here)
+            lvFinal.Alignment = ListViewAlignment.Default;         
+            
+            lvFinal.ItemDrag += lvFinal_ItemDrag;          // rename if needed
+            lvFinal.DragEnter += lvFinal_DragEnter;
+            lvFinal.DragOver += lvFinal_DragOver;          // ← new: for insertion mark
+            lvFinal.DragLeave += lvFinal_DragLeave;        // ← new: clean up
+            lvFinal.DragDrop += lvFinal_DragDrop;          // updated version
+            lvFinal.InsertionMark.Color = Color.DodgerBlue;           
 
-            // Buttons panel
-            var panel = new FlowLayoutPanel
+            imageListFinal = lvFinal.LargeImageList;
+            mainPanel.Controls.Add(lvFinal);
+
+            // Bottom buttons panel
+            btnPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 50,
-                Padding = new Padding(10)
+                Height = 70,
+                Padding = new Padding(10),
+                BackColor = Color.LightGray  // Optional: slight visual separation
             };
 
-            var btnMerge = new Button
+            var btnAddFiles = new Button { Text = "Add Files...", Width = 120 };
+            btnAddFiles.Click += (s, e) =>
             {
-                Text = "Merge & Save...",
-                Width = 150,
-                Height = 35
-            };
-            btnMerge.Click += BtnMerge_Click;
-
-            var btnClear = new Button
-            {
-                Text = "Clear List",
-                Width = 100,
-                Height = 35
-            };
-            btnClear.Click += (s, e) => { filePaths.Clear(); lv.Items.Clear(); };
-
-            panel.Controls.Add(btnMerge);
-            panel.Controls.Add(btnClear);
-
-            this.Controls.Add(lv);
-            this.Controls.Add(panel);
-
-            // Store ListView reference
-            lv.Tag = filePaths;
-        }
-
-        private void Form_DragEnter(object sender, DragEventArgs e)
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-                e.Effect = DragDropEffects.Copy;
-        }
-
-        private void Form_DragDrop(object sender, DragEventArgs e)
-        {
-            var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-            AddFilesToList(files);
-        }
-
-        private void Lv_DragEnter(object sender, DragEventArgs e)
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop) || e.Data.GetDataPresent(typeof(ListViewItem)))
-                e.Effect = DragDropEffects.Copy | DragDropEffects.Move;
-        }
-
-        private void Lv_ItemDrag(object sender, ItemDragEventArgs e)
-        {
-            if (e.Button == MouseButtons.Left && e.Item is ListViewItem lvi)
-            {
-                // Create drag data using the item directly (avoids the DataObject constructor overload ambiguity)
-                DoDragDrop(lvi, DragDropEffects.Move);
-            }
-        }
-
-        private void Lv_DragDrop(object sender, DragEventArgs e)
-        {
-            var lv = sender as ListView;
-            if (lv == null) return;
-
-            Point pt = lv.PointToClient(new Point(e.X, e.Y));
-            ListViewItem targetItem = lv.GetItemAt(pt.X, pt.Y);
-
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-                AddFilesToList(files);
-            }
-            else if (e.Data.GetDataPresent(typeof(ListViewItem)))
-            {
-                var draggedItem = (ListViewItem)e.Data.GetData(typeof(ListViewItem));
-                int targetIndex = targetItem != null ? targetItem.Index : lv.Items.Count;
-
-                // Remove and re-insert to reorder
-                lv.Items.Remove(draggedItem);
-                lv.Items.Insert(targetIndex, draggedItem);
-                // Update filePaths order
-                filePaths.RemoveAt(draggedItem.Index);
-                filePaths.Insert(targetIndex, filePaths[draggedItem.Index]);
-            }
-        }
-
-        private void AddFilesToList(string[] files)
-        {
-            var lv = Controls[0] as ListView; // First control is ListView
-            if (lv == null) return;
-
-            foreach (var file in files)
-            {
-                if (File.Exists(file) &&
-                    (Path.GetExtension(file).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ||
-                     IsImageFile(file)))
+                using var ofd = new OpenFileDialog
                 {
-                    if (!filePaths.Contains(file))
-                    {
-                        filePaths.Add(file);
-                        var item = new ListViewItem(Path.GetFileName(file));
-                        item.SubItems.Add(file); // Hidden full path
-                        lv.Items.Add(item);
-                    }
+                    Multiselect = true,
+                    Filter = "PDF & Images|*.pdf;*.jpg;*.jpeg;*.png;*.bmp;*.gif"
+                };
+                if (ofd.ShowDialog() == DialogResult.OK)
+                    AddToFinalFromFiles(ofd.FileNames);  // Add directly to final
+            };
+
+            var btnDelete = new Button { Text = "Delete Selected", Width = 120 };
+            btnDelete.Click += (s, e) =>
+            {
+                foreach (ListViewItem item in lvFinal.SelectedItems.Cast<ListViewItem>().ToList())
+                {
+                    finalPages.Remove((PageItem)item.Tag);
+                    lvFinal.Items.Remove(item);
+                }
+            };
+
+            var btnMergeSave = new Button { Text = "Merge & Save...", Width = 140 };
+            btnMergeSave.Click += BtnMergeSave_Click;
+
+            labelSaveMessage = new Label
+            {
+                Text = "",
+                AutoSize = true,
+                MinimumSize = new Size(300, 0),           // Prevents collapsing too small
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.Black,
+                Visible = false,                           // Start hidden
+                Padding = new Padding(5, 5, 10, 5),      // Breathing room
+                Margin = new Padding(0, 0, 0, 0)         // Space from previous buttons
+            };
+
+            btnPanel.Controls.Add(btnAddFiles);
+            btnPanel.Controls.Add(btnDelete);
+            btnPanel.Controls.Add(btnMergeSave);
+            btnPanel.Controls.Add(labelSaveMessage);
+
+            mainPanel.Controls.Add(btnPanel);
+
+            this.Controls.Add(mainPanel);            
+
+            // Optional: tag for clarity (not strictly needed anymore)
+            lvFinal.Tag = "final";
+        }
+
+        private void lvFinal_ItemDrag(object sender, ItemDragEventArgs e)
+        {
+            // Store source index for a reliable reference during Drop
+            if (e.Item is ListViewItem item)
+            {
+                dragSourceIndex = item.Index;
+                DoDragDrop(e.Item, DragDropEffects.Move);
+            }
+        }
+
+        private void lvFinal_DragEnter(object sender, DragEventArgs e)
+        {
+            // Allow our own reordering (Move) + file drops (Copy)
+            if (e.Data.GetDataPresent(typeof(ListViewItem)))
+            {
+                e.Effect = DragDropEffects.Move;
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                e.Effect = DragDropEffects.Copy;
+            }
+            else
+            {
+                e.Effect = DragDropEffects.None;
+            }
+        }
+        
+        private void lvFinal_DragOver(object sender, DragEventArgs e)
+        {
+            // Ensure an appropriate effect is reported
+            if (e.Data.GetDataPresent(typeof(ListViewItem)))
+                e.Effect = DragDropEffects.Move;
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                e.Effect = DragDropEffects.Copy;
+            else
+                e.Effect = DragDropEffects.None;
+
+            // Only update insertion mark when moving ListView items
+            if (e.Effect != DragDropEffects.Move)
+                return;
+
+            Point pt = lvFinal.PointToClient(new Point(e.X, e.Y));
+            ListViewItem targetItem = lvFinal.GetItemAt(pt.X, pt.Y);
+
+            if (targetItem == null)
+            {
+                lvFinal.InsertionMark.Index = -1;
+            }
+            else
+            {
+                Rectangle bounds = targetItem.Bounds;
+                int midpointY = bounds.Top + (bounds.Height / 2);
+
+                if (pt.Y < midpointY)
+                {
+                    lvFinal.InsertionMark.Index = targetItem.Index;
+                    lvFinal.InsertionMark.AppearsAfterItem = false;
+                }
+                else
+                {
+                    lvFinal.InsertionMark.Index = targetItem.Index;
+                    lvFinal.InsertionMark.AppearsAfterItem = true;
                 }
             }
         }
 
-        private bool IsImageFile(string file)
+        private void lvFinal_DragLeave(object sender, EventArgs e)
         {
-            var ext = Path.GetExtension(file).ToLower();
-            return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" || ext == ".gif";
+            // Clean up the insertion mark when mouse leaves the control
+            lvFinal.InsertionMark.Index = -1;
         }
 
-        private void BtnMerge_Click(object sender, EventArgs e)
+        private void lvFinal_DragDrop(object sender, DragEventArgs e)
         {
-            if (filePaths.Count == 0)
+            // Handle file drop
+            if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
-                MessageBox.Show("No files to merge!", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                AddToFinalFromFiles((string[])e.Data.GetData(DataFormats.FileDrop));
+                lvFinal.InsertionMark.Index = -1;
+                dragSourceIndex = -1;
                 return;
             }
 
-            using (var sfd = new SaveFileDialog
+            if (!e.Data.GetDataPresent(typeof(ListViewItem)))
             {
-                Filter = "PDF Files (*.pdf)|*.pdf",
-                Title = "Save Merged PDF",
-                FileName = "MergedDocument.pdf"
-            })
-            {
-                if (sfd.ShowDialog() != DialogResult.OK) return;
+                dragSourceIndex = -1;
+                return;
+            }
 
-                try
+            // Resolve the dragged item and source index
+            var draggedItemFromData = (ListViewItem)e.Data.GetData(typeof(ListViewItem));
+            int sourceIndex = dragSourceIndex >= 0 ? dragSourceIndex : draggedItemFromData?.Index ?? -1;
+            if (sourceIndex < 0 || sourceIndex >= lvFinal.Items.Count)
+            {
+                // Fallback: if the stored index is invalid, try to locate the item by reference
+                sourceIndex = Array.IndexOf(lvFinal.Items.Cast<ListViewItem>().ToArray(), draggedItemFromData);
+                if (sourceIndex < 0)
                 {
-                    using var outputDoc = new PdfDocument();
+                    dragSourceIndex = -1;
+                    return;
+                }
+            }
 
-                    foreach (var filePath in filePaths)
+            int targetIndex = lvFinal.InsertionMark.Index;
+            if (targetIndex == -1)
+            {
+                // append to end
+                targetIndex = lvFinal.Items.Count - 1;
+                targetIndex++; // insert at Count (append)
+            }
+            else if (lvFinal.InsertionMark.AppearsAfterItem)
+            {
+                targetIndex++;
+            }
+
+            // No-op checks (drop at same place or adjacent no-op)
+            if (targetIndex == sourceIndex || targetIndex == sourceIndex + 1)
+            {
+                lvFinal.InsertionMark.Index = -1;
+                dragSourceIndex = -1;
+                return;
+            }
+
+            lvFinal.BeginUpdate();
+            try
+            {
+                // Use the actual existing ListViewItem instance for smooth visual behavior
+                var itemToMove = lvFinal.Items[sourceIndex];
+
+                // Remove from UI and insert at new index (adjust target if necessary)
+                lvFinal.Items.RemoveAt(sourceIndex);
+                if (sourceIndex < targetIndex) targetIndex--; // removal shifts indexes down
+                lvFinal.Items.Insert(targetIndex, itemToMove);
+
+                // Sync backing list
+                var page = (PageItem)itemToMove.Tag;
+                // Remove at original source (adjusted using original sourceIndex)
+                finalPages.RemoveAt(sourceIndex);
+                // Insert at adjusted target index
+                finalPages.Insert(targetIndex, page);
+
+                // Select and ensure visible the moved item
+                itemToMove.Selected = true;
+                itemToMove.Focused = true;
+                lvFinal.EnsureVisible(targetIndex);
+            }
+            finally
+            {
+                lvFinal.EndUpdate();
+                ForceListViewLayoutRefresh(lvFinal);
+                lvFinal.InsertionMark.Index = -1;
+                dragSourceIndex = -1;
+            }
+        }
+        private void ForceListViewLayoutRefresh(ListView listView)
+        {
+            var originalView = listView.View;
+            listView.View = View.Tile;      // or View.Details — whichever flickers least noticeably
+            listView.View = originalView;
+            listView.Refresh();
+            listView.Update();
+        }
+
+        private void AddSourceFiles(string[] files)
+        {            
+            var imgList = lvSources.LargeImageList;
+
+            foreach (var file in files.Where(File.Exists))
+            {
+                if (!IsSupported(file)) continue;
+
+                var item = new ListViewItem(Path.GetFileName(file));
+                item.Tag = file;
+
+                // Generate thumbnail
+                var bmp = GenerateThumbnail(file, 96, 128);
+                if (bmp != null)
+                {
+                    imgList.Images.Add(file, bmp);
+                    item.ImageKey = file;
+                }
+
+                lvSources.Items.Add(item);
+            }
+        }
+
+        private void AddToFinalFromFiles(string[] files)
+        {
+            var imgList = lvFinal.LargeImageList;
+
+            foreach (var file in files.Where(File.Exists).Where(IsSupported))
+            {
+                if (Path.GetExtension(file).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
                     {
-                        if (IsImageFile(filePath))
+                        using var doc = PdfReader.Open(file, PdfDocumentOpenMode.Import);
+
+                        int pageCount = doc.PageCount;
+
+                        // Optional: handle truly empty PDFs gracefully
+                        if (pageCount == 0)
                         {
-                            // Add image as a new page
-                            var page = outputDoc.AddPage();
-                            var gfx = XGraphics.FromPdfPage(page);
-                            var image = XImage.FromFile(filePath);
-                            gfx.DrawImage(image, 0, 0, page.Width, page.Height); // Scale to fit
+                            MessageBox.Show($"The PDF file is empty (0 pages):\n{Path.GetFileName(file)}",
+                                            "Empty PDF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            continue;
                         }
-                        else
+
+                        for (int i = 0; i < pageCount; i++)
                         {
-                            // Merge existing PDF
-                            using var inputDoc = PdfReader.Open(filePath, PdfDocumentOpenMode.Import);
-                            foreach (PdfPage page in inputDoc.Pages)
+                            var pageItem = new PageItem { SourceFile = file, PageIndex = i };
+                            finalPages.Add(pageItem);
+
+                            var bmp = RenderPageToBitmap(file, i, 96, 128);
+                            if (bmp != null)
                             {
-                                outputDoc.AddPage(page);
+                                string key = $"{file}|{i}";
+                                imgList.Images.Add(key, bmp);
+
+                                var lvi = new ListViewItem($"Pg {i + 1} - {Path.GetFileName(file)}")
+                                {
+                                    Tag = pageItem,
+                                    ImageKey = key
+                                };
+                                lvFinal.Items.Add(lvi);
+                            }
+                            else
+                            {
+                                // Fallback thumbnail if rendering fails
+                                var fallbackBmp = CreateFallbackThumbnail(file, i);
+                                if (fallbackBmp != null)
+                                {
+                                    string fallbackKey = $"fallback|{file}|{i}";
+                                    imgList.Images.Add(fallbackKey, fallbackBmp);
+                                    var lvi = new ListViewItem($"Pg {i + 1} - {Path.GetFileName(file)} (preview failed)")
+                                    {
+                                        Tag = pageItem,
+                                        ImageKey = fallbackKey
+                                    };
+                                    lvFinal.Items.Add(lvi);
+                                }
                             }
                         }
                     }
-
-                    outputDoc.Save(sfd.FileName);
-                    MessageBox.Show($"Merged PDF saved successfully!\n{sfd.FileName}", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Failed to load PDF:\n{Path.GetFileName(file)}\n\n{ex.Message}",
+                                        "PDF Processing Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        // Continue with next file instead of crashing
+                    }
                 }
-                catch (Exception ex)
+                else // image files
                 {
-                    MessageBox.Show($"Error merging files:\n{ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    try
+                    {
+                        var pageItem = new PageItem { SourceFile = file, PageIndex = -1 }; // -1 = image
+                        finalPages.Add(pageItem);
+
+                        var bmp = GenerateThumbnail(file, 96, 128);
+                        if (bmp != null)
+                        {
+                            string key = file;
+                            imgList.Images.Add(key, bmp);
+
+                            var lvi = new ListViewItem(Path.GetFileName(file))
+                            {
+                                Tag = pageItem,
+                                ImageKey = key
+                            };
+                            lvFinal.Items.Add(lvi);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Failed to load image:\n{Path.GetFileName(file)}\n\n{ex.Message}",
+                                        "Image Load Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
                 }
             }
+
+            // Optional: refresh the list view after adding
+            lvFinal.Refresh();
         }
+
+        private Bitmap GenerateThumbnail(string filePath, int width, int height)
+        {
+            try
+            {
+                if (IsImageFile(filePath))
+                {
+                    using var img = Image.FromFile(filePath);
+                    return new Bitmap(img, new Size(width, height));
+                }
+
+                // For PDFs: render page 0
+                return RenderPageToBitmap(filePath, 0, width, height);
+            }
+            catch
+            {
+                return null;  // fallback placeholder
+            }
+        }
+
+        private Bitmap RenderPageToBitmap(string pdfPath, int pageIndex, int thumbWidth, int thumbHeight)
+        {
+            try
+            {
+                using var document = PdfiumViewer.PdfDocument.Load(pdfPath);
+
+                if (pageIndex < 0 || pageIndex >= document.PageCount)
+                    return null;
+
+                // Get page size in points (1 point = 1/72 inch)
+                var pageSize = document.PageSizes[pageIndex];
+                int dpi = 120;
+                int renderWidth = (int)(pageSize.Width * dpi / 72.0);
+                int renderHeight = (int)(pageSize.Height * dpi / 72.0);
+
+                // Render the page to an image
+                using var fullBitmap = document.Render(pageIndex, renderWidth, renderHeight, dpi, dpi, false);
+
+                // Scale down to thumbnail size while preserving aspect ratio
+                return new Bitmap(fullBitmap, new Size(thumbWidth, thumbHeight));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Render failed for {pdfPath} page {pageIndex}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private Bitmap CreateFallbackThumbnail(string filePath, int pageIndex)
+        {
+            try
+            {
+                var bmp = new Bitmap(96, 128, PixelFormat.Format32bppArgb);
+                using var g = Graphics.FromImage(bmp);
+                g.Clear(Color.WhiteSmoke);
+                using var font = new System.Drawing.Font("Segoe UI", 9, FontStyle.Regular);
+                using var brush = new SolidBrush(Color.DimGray);
+
+                g.DrawString("PDF Page", font, brush, 10, 30);
+                g.DrawString($"Page {pageIndex + 1}", font, brush, 10, 55);
+                g.DrawString(Path.GetFileName(filePath), font, brush, 10, 80);
+
+                return bmp;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void BtnMergeSave_Click(object sender, EventArgs e)
+        {
+            if (!finalPages.Any())
+            {
+                labelSaveMessage.Text = "No pages to merge!";
+                labelSaveMessage.ForeColor = Color.Black;
+                labelSaveMessage.Visible = true;
+                btnPanel.PerformLayout();
+                btnPanel.Refresh();
+                btnPanel.Update();
+                return;
+            }
+
+            using var sfd = new SaveFileDialog { Filter = "PDF|*.pdf", FileName = "Merged.pdf" };
+            if (sfd.ShowDialog() != DialogResult.OK) return;
+
+            try
+            {
+                using var output = new PdfSharpCore.Pdf.PdfDocument();
+
+                foreach (var item in finalPages)
+                {
+                    if (item.PageIndex == -1) // Image
+                    {
+                        var page = output.AddPage();
+                        var gfx = XGraphics.FromPdfPage(page);
+                        var ximg = XImage.FromFile(item.SourceFile);
+                        gfx.DrawImage(ximg, 0, 0, page.Width, page.Height); // fit
+                    }
+                    else // PDF page
+                    {
+                        using var srcDoc = PdfReader.Open(item.SourceFile, PdfDocumentOpenMode.Import);
+                        output.AddPage(srcDoc.Pages[item.PageIndex]);
+                    }
+                }
+
+                output.Save(sfd.FileName);                
+                labelSaveMessage.Text = $"Saved successfully: {sfd.FileName}";
+                labelSaveMessage.ForeColor = Color.Green;
+                labelSaveMessage.Visible = true;
+            }
+            catch (Exception ex)
+            {
+                labelSaveMessage.Text = $"Failed to save the PDF. Error: {ex.Message}";
+                labelSaveMessage.ForeColor = Color.Red;
+                labelSaveMessage.Visible = true;
+            }
+
+            btnPanel.PerformLayout();
+            btnPanel.Refresh();
+            btnPanel.Update();
+        }
+
+        private bool IsSupported(string file) =>
+            IsImageFile(file) || Path.GetExtension(file).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
+
+        private bool IsImageFile(string file)
+        {
+            var ext = Path.GetExtension(file)?.ToLower();
+            return ext is ".jpg" or ".jpeg" or ".png" or ".bmp" or ".gif";
+        }
+    }
+
+    public class PageItem
+    {
+        public string SourceFile { get; set; }
+        public int PageIndex { get; set; }   // -1 for image
     }
 }
