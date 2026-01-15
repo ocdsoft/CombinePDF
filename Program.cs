@@ -15,7 +15,7 @@ namespace CombinePDF
             Application.SetCompatibleTextRenderingDefault(false);
             // Optional: force per-monitor DPI in code (helps on .NET 6+)
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
-            Application.Run(new Main());
+            Application.Run(new MainForm());
         }
     }
 }

@@ -15,7 +15,7 @@ using Image = System.Drawing.Image;
 
 namespace CombinePDF
 {
-    public partial class Main : Form
+    public partial class MainForm : Form
     {
         private List<PageItem> finalPages = new List<PageItem>();   // Final pages to merge (source file + page index)
         private System.Windows.Forms.ListView lvSources;   // left side = source files
@@ -27,7 +27,7 @@ namespace CombinePDF
         private FlowLayoutPanel btnPanel;
         private System.Windows.Forms.ToolTip toolTipSaveMessage;  // field at class level
 
-        public Main()
+        public MainForm()
         {
             InitializeComponent();
             SetupUI();
