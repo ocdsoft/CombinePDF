@@ -18,9 +18,7 @@ namespace CombinePDF
     public partial class MainForm : Form
     {
         private List<PageItem> finalPages = new List<PageItem>();   // Final pages to merge (source file + page index)
-        private System.Windows.Forms.ListView lvSources;   // left side = source files
         private System.Windows.Forms.ListView lvFinal;     // right side = final pages
-        private ImageList imageListSources;  // optional, if you want separate image lists
         private ImageList imageListFinal;
         private int dragSourceIndex = -1;
         private Label labelSaveMessage;
@@ -360,29 +358,6 @@ namespace CombinePDF
             listView.View = originalView;
             listView.Refresh();
             listView.Update();
-        }
-
-        private void AddSourceFiles(string[] files)
-        {            
-            var imgList = lvSources.LargeImageList;
-
-            foreach (var file in files.Where(File.Exists))
-            {
-                if (!IsSupported(file)) continue;
-
-                var item = new ListViewItem(Path.GetFileName(file));
-                item.Tag = file;
-
-                // Generate thumbnail
-                var bmp = GenerateThumbnail(file, 96, 128);
-                if (bmp != null)
-                {
-                    imgList.Images.Add(file, bmp);
-                    item.ImageKey = file;
-                }
-
-                lvSources.Items.Add(item);
-            }
         }
 
         private void AddToFinalFromFiles(string[] files)
