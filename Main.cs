@@ -1,4 +1,5 @@
-﻿using PdfSharpCore.Drawing;
+﻿using PdfiumViewer;
+using PdfSharpCore.Drawing;
 using PdfSharpCore.Pdf;
 using PdfSharpCore.Pdf.IO;
 using System;
@@ -9,38 +10,74 @@ using System.IO;
 using System.Reflection.PortableExecutable;
 using System.Windows.Forms;
 using static System.Net.Mime.MediaTypeNames;
-using PdfiumViewer;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 using Image = System.Drawing.Image;
 
 namespace CombinePDF
 {
-    public partial class Form1 : Form
+    public partial class Main : Form
     {
         private List<PageItem> finalPages = new List<PageItem>();   // Final pages to merge (source file + page index)
-        private ListView lvSources;   // left side = source files
-        private ListView lvFinal;     // right side = final pages
+        private System.Windows.Forms.ListView lvSources;   // left side = source files
+        private System.Windows.Forms.ListView lvFinal;     // right side = final pages
         private ImageList imageListSources;  // optional, if you want separate image lists
         private ImageList imageListFinal;
         private int dragSourceIndex = -1;
         private Label labelSaveMessage;
         private FlowLayoutPanel btnPanel;
+        private System.Windows.Forms.ToolTip toolTipSaveMessage;  // field at class level
 
-        public Form1()
+        public Main()
         {
             InitializeComponent();
             SetupUI();
         }
 
+        
+        private void ScaleThumbnails()
+        {
+            using var g = this.CreateGraphics();
+            float dpiX = g.DpiX;  // Current DPI
+
+            // Scale from base 96 DPI
+            float scale = dpiX / 96f;
+
+            int baseWidth = 96;
+            int baseHeight = 128;
+
+            int newWidth = (int)(baseWidth * scale);
+            int newHeight = (int)(baseHeight * scale);
+
+            // Minimum size to avoid tiny thumbs
+            newWidth = Math.Max(64, newWidth);
+            newHeight = Math.Max(85, newHeight);
+
+            lvFinal.LargeImageList.ImageSize = new Size(newWidth, newHeight);
+
+            // Optional: regenerate thumbnails at new size (best quality)
+            // This requires re-adding images — do only if DPI changed significantly
+            // For simplicity, rely on bitmap scaling (WinForms handles it ok)
+        }
+
         private void SetupUI()
         {
-            this.Text = "Advanced PDF Merger & Page Editor";
+            this.Text = "Combine PDF";
             this.Size = new Size(900, 700);  // Slightly narrower since no left panel
             this.AllowDrop = true;
+            this.AutoScaleMode = AutoScaleMode.Dpi;  // or AutoScaleMode.Font if font scaling matters more
+            this.AutoScaleDimensions = new SizeF(96F, 96F);  // Design-time 96 DPI baseline
 
             // No SplitContainer anymore - use a single main panel for the final view
             var mainPanel = new Panel { Dock = DockStyle.Fill };
 
-            lvFinal = new ListView
+            toolTipSaveMessage = new System.Windows.Forms.ToolTip
+            {
+                AutoPopDelay = 30000,   // show longer
+                InitialDelay = 500,
+                ShowAlways = true
+            };
+
+            lvFinal = new System.Windows.Forms.ListView
             {
                 Dock = DockStyle.Fill,
                 View = View.LargeIcon,
@@ -69,12 +106,21 @@ namespace CombinePDF
             btnPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Bottom,
-                Height = 70,
+                Height = 80,
                 Padding = new Padding(10),
-                BackColor = Color.LightGray  // Optional: slight visual separation
+                BackColor = Color.LightGray,  // Optional: slight visual separation
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = true,  // Prevent wrapping on narrow windows
+                AutoSize = true,       // Let it grow vertically if needed
+                AutoScroll = true,               
+                Margin = new Padding(0, 0, 0, 10)
             };
+                        
+            btnPanel.AutoScrollMargin = new Size(0, 20);
 
-            var btnAddFiles = new Button { Text = "Add Files...", Width = 120 };
+            btnPanel.Scroll += btnPanel_Scroll;
+
+            var btnAddFiles = new System.Windows.Forms.Button { Text = "Add Files...", Width = 120 };
             btnAddFiles.Click += (s, e) =>
             {
                 using var ofd = new OpenFileDialog
@@ -86,7 +132,7 @@ namespace CombinePDF
                     AddToFinalFromFiles(ofd.FileNames);  // Add directly to final
             };
 
-            var btnDelete = new Button { Text = "Delete Selected", Width = 120 };
+            var btnDelete = new System.Windows.Forms.Button { Text = "Delete Selected", Width = 120 };
             btnDelete.Click += (s, e) =>
             {
                 foreach (ListViewItem item in lvFinal.SelectedItems.Cast<ListViewItem>().ToList())
@@ -96,8 +142,12 @@ namespace CombinePDF
                 }
             };
 
-            var btnMergeSave = new Button { Text = "Merge & Save...", Width = 140 };
+            var btnMergeSave = new System.Windows.Forms.Button { Text = "Merge & Save...", Width = 140 };
             btnMergeSave.Click += BtnMergeSave_Click;
+
+            btnAddFiles.AutoSize = true;
+            btnDelete.AutoSize = true;
+            btnMergeSave.AutoSize = true;
 
             labelSaveMessage = new Label
             {
@@ -108,7 +158,8 @@ namespace CombinePDF
                 ForeColor = Color.Black,
                 Visible = false,                           // Start hidden
                 Padding = new Padding(5, 5, 10, 5),      // Breathing room
-                Margin = new Padding(0, 0, 0, 0)         // Space from previous buttons
+                Margin = new Padding(0, 0, 0, 0)  // Space from previous buttons                
+                
             };
 
             btnPanel.Controls.Add(btnAddFiles);
@@ -122,6 +173,30 @@ namespace CombinePDF
 
             // Optional: tag for clarity (not strictly needed anymore)
             lvFinal.Tag = "final";
+
+            ScaleThumbnails();
+
+            this.Resize += (s, e) =>
+            {
+                if (this.WindowState == FormWindowState.Normal)
+                {
+                    // Optional: adjust thumbnail size on resize if desired
+                    ScaleThumbnails();
+                }
+            };
+        }
+        private void btnPanel_Scroll(object sender, ScrollEventArgs e)
+        {
+            // Called when scroll happens / scrollbar appears
+            if (btnPanel.VerticalScroll.Visible)
+            {
+                // Add extra bottom padding when scrollbar is visible
+                btnPanel.Padding = new Padding(10, 10, 10, 30);  // bottom 30px to clear scrollbar
+            }
+            else
+            {
+                btnPanel.Padding = new Padding(10);  // normal padding
+            }
         }
 
         private void lvFinal_ItemDrag(object sender, ItemDragEventArgs e)
@@ -278,7 +353,7 @@ namespace CombinePDF
                 dragSourceIndex = -1;
             }
         }
-        private void ForceListViewLayoutRefresh(ListView listView)
+        private void ForceListViewLayoutRefresh(System.Windows.Forms.ListView listView)
         {
             var originalView = listView.View;
             listView.View = View.Tile;      // or View.Details — whichever flickers least noticeably
@@ -528,6 +603,8 @@ namespace CombinePDF
             btnPanel.PerformLayout();
             btnPanel.Refresh();
             btnPanel.Update();
+
+            toolTipSaveMessage.SetToolTip(labelSaveMessage, labelSaveMessage.Text);
         }
 
         private bool IsSupported(string file) =>
