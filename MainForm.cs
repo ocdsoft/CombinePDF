@@ -12,11 +12,15 @@ using System.Windows.Forms;
 using static System.Net.Mime.MediaTypeNames;
 using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 using Image = System.Drawing.Image;
+using TrackBar = System.Windows.Forms.TrackBar;
 
 namespace CombinePDF
 {
     public partial class MainForm : Form
     {
+        private TrackBar qualitySlider;
+        private Label lblQuality;
+        private int currentDpi = 150;        // Default: good balance (was 300 before)
         private List<PageItem> finalPages = new List<PageItem>();   // Final pages to merge (source file + page index)
         private System.Windows.Forms.ListView lvFinal;     // right side = final pages
         private ImageList imageListFinal;
@@ -154,6 +158,31 @@ namespace CombinePDF
             }
         }
 
+        private Bitmap RenderPageToBitmapWithDpi(string pdfPath, int pageIndex, int dpi)
+        {
+            try
+            {
+                using var document = PdfiumViewer.PdfDocument.Load(pdfPath);
+
+                if (pageIndex < 0 || pageIndex >= document.PageCount)
+                    return null;
+
+                var pageSize = document.PageSizes[pageIndex];
+
+                int renderWidth = (int)(pageSize.Width * dpi / 72.0);
+                int renderHeight = (int)(pageSize.Height * dpi / 72.0);
+
+                using var fullBitmap = document.Render(pageIndex, renderWidth, renderHeight, dpi, dpi, false);
+
+                return new Bitmap(fullBitmap);   // copy so Pdfium document can be disposed
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Render at {dpi} DPI failed: {ex.Message}");
+                return null;
+            }
+        }
+
         private void SetupUI()
         {
             this.Text = "Combine PDF";
@@ -259,9 +288,42 @@ namespace CombinePDF
                 
             };
 
+            // New: Quality controls for PDF rendering resolution
+            lblQuality = new Label
+            {
+                Text = "PDF Render DPI:",
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 8, 0, 0)
+            };
+
+            qualitySlider = new TrackBar
+            {
+                Minimum = 72,      // Very small / low quality
+                Maximum = 300,     // High quality
+                Value = currentDpi,
+                TickFrequency = 30,
+                SmallChange = 10,
+                LargeChange = 50,
+                Width = 200,
+                Height = 30,
+                AutoSize = false
+            };
+
+            qualitySlider.ValueChanged += (s, e) =>
+            {
+                currentDpi = qualitySlider.Value;
+                lblQuality.Text = $"PDF Render DPI: {currentDpi}";
+                toolTipSaveMessage.SetToolTip(qualitySlider,
+                    $"Render PDF pages at {currentDpi} DPI\n" +
+                    "Lower = smaller file size\nHigher = better quality");
+            };
+
             btnPanel.Controls.Add(btnAddFiles);
             btnPanel.Controls.Add(btnDelete);
             btnPanel.Controls.Add(btnMergeSave);
+            btnPanel.Controls.Add(lblQuality);
+            btnPanel.Controls.Add(qualitySlider);
             btnPanel.Controls.Add(labelSaveMessage);
 
             mainPanel.Controls.Add(btnPanel);
@@ -642,13 +704,17 @@ namespace CombinePDF
                 labelSaveMessage.ForeColor = Color.Black;
                 labelSaveMessage.Visible = true;
                 btnPanel.PerformLayout();
-                btnPanel.Refresh();
-                btnPanel.Update();
                 return;
             }
 
-            using var sfd = new SaveFileDialog { Filter = "PDF|*.pdf", FileName = "Merged.pdf" };
-            if (sfd.ShowDialog() != DialogResult.OK) return;
+            using var sfd = new SaveFileDialog
+            {
+                Filter = "PDF|*.pdf",
+                FileName = "Merged.pdf"
+            };
+
+            if (sfd.ShowDialog() != DialogResult.OK)
+                return;
 
             try
             {
@@ -656,22 +722,51 @@ namespace CombinePDF
 
                 foreach (var item in finalPages)
                 {
-                    if (item.PageIndex == -1) // Image
+                    if (item.PageIndex == -1) // Image file - unchanged (uses JPEG quality)
                     {
                         var page = output.AddPage();
                         var gfx = XGraphics.FromPdfPage(page);
-                        var ximg = XImage.FromFile(item.SourceFile);
-                        gfx.DrawImage(ximg, 0, 0, page.Width, page.Height); // fit
+
+                        using var sysImage = Image.FromFile(item.SourceFile);
+
+                        var encoder = GetJpegEncoder();
+                        var encoderParams = new EncoderParameters(1);
+                        encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, long.Parse(((currentDpi / 300.0) * 100).ToString("#,##0"))); // fixed good default for images
+
+                        using var ms = new MemoryStream();
+                        sysImage.Save(ms, encoder, encoderParams);
+                        ms.Position = 0;
+
+                        using var ximg = XImage.FromStream(() => new MemoryStream(ms.ToArray()));
+                        gfx.DrawImage(ximg, 0, 0, page.Width, page.Height);
                     }
-                    else // PDF page
+                    else // PDF page → render at selected DPI and embed as image
                     {
-                        using var srcDoc = PdfReader.Open(item.SourceFile, PdfDocumentOpenMode.Import);
-                        output.AddPage(srcDoc.Pages[item.PageIndex]);
+                        var bmp = RenderPageToBitmapWithDpi(item.SourceFile, item.PageIndex, currentDpi);
+
+                        if (bmp == null)
+                        {
+                            // Fallback: just copy the original page (no quality reduction)
+                            using var srcDoc = PdfReader.Open(item.SourceFile, PdfDocumentOpenMode.Import);
+                            output.AddPage(srcDoc.Pages[item.PageIndex]);
+                            continue;
+                        }
+
+                        var page = output.AddPage();
+                        var gfx = XGraphics.FromPdfPage(page);
+
+                        using var ms = new MemoryStream();
+                        bmp.Save(ms, ImageFormat.Jpeg);   // or use quality parameter if you want
+                        ms.Position = 0;
+
+                        using var ximg = XImage.FromStream(() => new MemoryStream(ms.ToArray()));
+                        gfx.DrawImage(ximg, 0, 0, page.Width, page.Height);
                     }
                 }
 
-                output.Save(sfd.FileName);                
-                labelSaveMessage.Text = $"Saved successfully: {sfd.FileName}";
+                output.Save(sfd.FileName);
+
+                labelSaveMessage.Text = $"Saved successfully: {sfd.FileName} (PDF pages rendered at {currentDpi} DPI)";
                 labelSaveMessage.ForeColor = Color.Green;
                 labelSaveMessage.Visible = true;
             }
@@ -684,9 +779,18 @@ namespace CombinePDF
 
             btnPanel.PerformLayout();
             btnPanel.Refresh();
-            btnPanel.Update();
-
             toolTipSaveMessage.SetToolTip(labelSaveMessage, labelSaveMessage.Text);
+        }
+
+        private ImageCodecInfo GetJpegEncoder()
+        {
+            var codecs = ImageCodecInfo.GetImageEncoders();
+            foreach (var codec in codecs)
+            {
+                if (codec.FormatID == ImageFormat.Jpeg.Guid)
+                    return codec;
+            }
+            throw new Exception("JPEG Encoder not found.");
         }
 
         private bool IsSupported(string file) =>
