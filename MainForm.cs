@@ -57,6 +57,103 @@ namespace CombinePDF
             // For simplicity, rely on bitmap scaling (WinForms handles it ok)
         }
 
+        private void ShowPagePreview(ListViewItem item)
+        {
+            if (item?.Tag is not PageItem pageItem)
+                return;
+
+            var previewForm = new Form
+            {
+                Text = item.Text + " - Preview",
+                WindowState = FormWindowState.Maximized,
+                StartPosition = FormStartPosition.CenterScreen,
+                FormBorderStyle = FormBorderStyle.Sizable,
+                MinimumSize = new Size(900, 700),
+                BackColor = Color.Black
+            };
+
+            // Escape key to close
+            previewForm.KeyPreview = true;
+            previewForm.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Escape)
+                    previewForm.Close();
+            };
+
+            try
+            {
+                if (pageItem.PageIndex == -1) // Image file
+                {
+                    using var original = Image.FromFile(pageItem.SourceFile);
+                    var pb = new PictureBox
+                    {
+                        Dock = DockStyle.Fill,
+                        SizeMode = PictureBoxSizeMode.Zoom,
+                        Image = new Bitmap(original),   // copy to avoid file lock
+                        BackColor = Color.Black
+                    };
+                    previewForm.Controls.Add(pb);
+                }
+                else // PDF page - render ONLY this page at high resolution
+                {
+                    var bmp = RenderPageToBitmapHighQuality(pageItem.SourceFile, pageItem.PageIndex);
+
+                    if (bmp == null)
+                    {
+                        MessageBox.Show("Failed to render the selected PDF page.", "Preview Error",
+                                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    var pb = new PictureBox
+                    {
+                        Dock = DockStyle.Fill,
+                        SizeMode = PictureBoxSizeMode.Zoom,   // or .CenterImage if you prefer exact size
+                        Image = bmp,
+                        BackColor = Color.White
+                    };
+                    previewForm.Controls.Add(pb);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to load preview:\n{ex.Message}", "Preview Error",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            previewForm.ShowDialog(this);
+        }
+
+        private Bitmap RenderPageToBitmapHighQuality(string pdfPath, int pageIndex)
+        {
+            try
+            {
+                using var document = PdfiumViewer.PdfDocument.Load(pdfPath);
+
+                if (pageIndex < 0 || pageIndex >= document.PageCount)
+                    return null;
+
+                var pageSize = document.PageSizes[pageIndex];
+
+                // Higher DPI for much better preview quality (adjust as needed)
+                const int dpi = 300;
+
+                int renderWidth = (int)(pageSize.Width * dpi / 72.0);
+                int renderHeight = (int)(pageSize.Height * dpi / 72.0);
+
+                using var fullBitmap = document.Render(pageIndex, renderWidth, renderHeight, dpi, dpi, false);
+
+                // Return a copy so we can dispose the document safely
+                return new Bitmap(fullBitmap);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"High-quality render failed: {ex.Message}");
+                return null;
+            }
+        }
+
         private void SetupUI()
         {
             this.Text = "Combine PDF";
@@ -95,7 +192,9 @@ namespace CombinePDF
             lvFinal.DragOver += lvFinal_DragOver;          // ← new: for insertion mark
             lvFinal.DragLeave += lvFinal_DragLeave;        // ← new: clean up
             lvFinal.DragDrop += lvFinal_DragDrop;          // updated version
-            lvFinal.InsertionMark.Color = Color.DodgerBlue;           
+            lvFinal.InsertionMark.Color = Color.DodgerBlue;
+            // Add this line:
+            lvFinal.ItemActivate += lvFinal_ItemActivate;   // Recommended (double-click in LargeIcon view)
 
             imageListFinal = lvFinal.LargeImageList;
             mainPanel.Controls.Add(lvFinal);
@@ -349,6 +448,14 @@ namespace CombinePDF
                 ForceListViewLayoutRefresh(lvFinal);
                 lvFinal.InsertionMark.Index = -1;
                 dragSourceIndex = -1;
+            }
+        }
+
+        private void lvFinal_ItemActivate(object sender, EventArgs e)
+        {
+            if (lvFinal.SelectedItems.Count == 1)
+            {
+                ShowPagePreview(lvFinal.SelectedItems[0]);
             }
         }
         private void ForceListViewLayoutRefresh(System.Windows.Forms.ListView listView)
