@@ -221,9 +221,12 @@ namespace CombinePDF
             lvFinal.DragOver += lvFinal_DragOver;          // ← new: for insertion mark
             lvFinal.DragLeave += lvFinal_DragLeave;        // ← new: clean up
             lvFinal.DragDrop += lvFinal_DragDrop;          // updated version
+            lvFinal.ItemMouseHover += lvFinal_ItemMouseHover;
+            lvFinal.MouseLeave += lvFinal_MouseLeave;   // Clean up tooltip when mouse leaves
             lvFinal.InsertionMark.Color = Color.DodgerBlue;
             // Add this line:
             lvFinal.ItemActivate += lvFinal_ItemActivate;   // Recommended (double-click in LargeIcon view)
+            
 
             imageListFinal = lvFinal.LargeImageList;
             mainPanel.Controls.Add(lvFinal);
@@ -360,12 +363,26 @@ namespace CombinePDF
 
         private void lvFinal_ItemDrag(object sender, ItemDragEventArgs e)
         {
-            // Store source index for a reliable reference during Drop
-            if (e.Item is ListViewItem item)
+            if (e.Item is not ListViewItem draggedItem)
+                return;
+
+            // Hold Ctrl → Drag to Explorer (export selected pages as new PDF)
+            if ((Control.ModifierKeys & Keys.Control) == Keys.Control)
             {
-                dragSourceIndex = item.Index;
-                DoDragDrop(e.Item, DragDropEffects.Move);
+                var selectedItems = lvFinal.SelectedItems.Cast<ListViewItem>().ToList();
+
+                // If only one item is selected, use the dragged item (in case selection is weird)
+                if (selectedItems.Count == 0)
+                    selectedItems.Add(draggedItem);
+
+                dragSourceIndex = -1; // Prevent internal reorder interference
+                StartExternalDrag(selectedItems);
+                return;
             }
+
+            // Normal internal reordering (single or multi)
+            dragSourceIndex = draggedItem.Index;
+            DoDragDrop(e.Item, DragDropEffects.Move);
         }
 
         private void lvFinal_DragEnter(object sender, DragEventArgs e)
@@ -520,6 +537,23 @@ namespace CombinePDF
                 ShowPagePreview(lvFinal.SelectedItems[0]);
             }
         }
+        private void lvFinal_ItemMouseHover(object sender, ListViewItemMouseHoverEventArgs e)
+        {
+            if (e.Item?.Tag is not PageItem pageItem)
+                return;
+
+            string tooltipText = "Drag: Reorder pages\n" +
+                           "Ctrl + Drag: Export selected page(s) to new PDF";
+
+            toolTipSaveMessage.SetToolTip(lvFinal, tooltipText);
+        }
+        private void lvFinal_MouseLeave(object sender, EventArgs e)
+        {
+            // Clear tooltip when mouse leaves the ListView
+            toolTipSaveMessage.SetToolTip(lvFinal, "");
+        }
+
+
         private void ForceListViewLayoutRefresh(System.Windows.Forms.ListView listView)
         {
             var originalView = listView.View;
@@ -527,6 +561,87 @@ namespace CombinePDF
             listView.View = originalView;
             listView.Refresh();
             listView.Update();
+        }
+
+        private void StartExternalDrag(List<ListViewItem> items)
+        {
+            if (items == null || items.Count == 0)
+                return;
+
+            try
+            {
+                // Generate a nice filename
+                string baseName = items.Count == 1
+                    ? $"Extracted_{Path.GetFileNameWithoutExtension(((PageItem)items[0].Tag).SourceFile)}"
+                    : $"Extracted_Pages_{DateTime.Now:yyyyMMdd_HHmmss}";
+
+                string tempFilePath = Path.Combine(Path.GetTempPath(), baseName + ".pdf");
+
+                using (var output = new PdfSharpCore.Pdf.PdfDocument())
+                {
+                    foreach (var item in items)
+                    {
+                        if (item.Tag is not PageItem pageItem)
+                            continue;
+
+                        if (pageItem.PageIndex == -1) // Image file
+                        {
+                            var page = output.AddPage();
+                            var gfx = XGraphics.FromPdfPage(page);
+
+                            using var sysImage = Image.FromFile(pageItem.SourceFile);
+                            var encoder = GetJpegEncoder();
+                            var encoderParams = new EncoderParameters(1);
+                            encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, long.Parse(((currentDpi / 300.0) * 100).ToString("#,##0")));
+
+                            using var ms = new MemoryStream();
+                            sysImage.Save(ms, encoder, encoderParams);
+                            ms.Position = 0;
+
+                            using var ximg = XImage.FromStream(() => new MemoryStream(ms.ToArray()));
+                            gfx.DrawImage(ximg, 0, 0, page.Width, page.Height);
+                        }
+                        else // PDF page - render using current DPI slider
+                        {
+                            var bmp = RenderPageToBitmapWithDpi(pageItem.SourceFile, pageItem.PageIndex, currentDpi);
+
+                            var page = output.AddPage();
+                            var gfx = XGraphics.FromPdfPage(page);
+
+                            if (bmp != null)
+                            {
+                                using var ms = new MemoryStream();
+                                bmp.Save(ms, ImageFormat.Jpeg);
+                                ms.Position = 0;
+
+                                using var ximg = XImage.FromStream(() => new MemoryStream(ms.ToArray()));
+                                gfx.DrawImage(ximg, 0, 0, page.Width, page.Height);
+                            }
+                            else
+                            {
+                                // Fallback: copy original page
+                                using var srcDoc = PdfReader.Open(pageItem.SourceFile, PdfDocumentOpenMode.Import);
+                                output.AddPage(srcDoc.Pages[pageItem.PageIndex]);
+                            }
+                        }
+                    }
+
+                    output.Save(tempFilePath);
+                }
+
+                // Prepare drag data for File Explorer
+                var data = new DataObject();
+                data.SetData(DataFormats.FileDrop, new string[] { tempFilePath });
+                data.SetData(DataFormats.Text, Path.GetFileName(tempFilePath));
+
+                // Start external drag (Copy effect)
+                lvFinal.DoDragDrop(data, DragDropEffects.Copy);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to prepare pages for drag:\n{ex.Message}", "Drag Error",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void AddToFinalFromFiles(string[] files)
