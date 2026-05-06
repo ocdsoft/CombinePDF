@@ -5,7 +5,11 @@ A simple .NET library to combine multiple PDF files into a single PDF document.
 ## Features
 
 - Drag and drop or upload multiple images or PDF files.
-- Combine files into a single PDF document.
+- Reorder pages
+- Extract pages to Explorer - Ctrl + Left click
+- Expand page to full screen to read contents
+- Scale output to optimize for file size or quality
+- Combine files into a single PDF document.- 
 - Save the combined PDF.
 
 ## Installation
